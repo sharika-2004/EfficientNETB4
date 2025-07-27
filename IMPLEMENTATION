@@ -1,0 +1,200 @@
+!pip uninstall -y tf-keras tensorflow-text tensorflow-decision-forests tensorflow
+!pip install tensorflow==2.18.0
+!pip install keras_applications
+!pip install kaggle
+import tensorflow as tf
+from tensorflow import keras
+print("TensorFlow version:", tf.__version__)
+print("Keras version:", keras.__version__)
+from google.colab import files
+import os
+import zipfile
+
+# Upload kaggle.json (upload manually when prompted)
+files.upload()
+
+# Move kaggle.json to the correct location
+os.makedirs('/root/.kaggle', exist_ok=True)
+!mv kaggle.json /root/.kaggle/
+!chmod 600 /root/.kaggle/kaggle.json
+
+# Download the Flowers Recognition dataset
+!kaggle datasets download -d alxmamaev/flowers-recognition
+
+# Unzip the dataset
+with zipfile.ZipFile("flowers-recognition.zip", 'r') as zip_ref:
+    zip_ref.extractall("flowers_dataset")
+import matplotlib.pyplot as plt
+
+data_dir = "flowers_dataset/flowers"
+class_names = sorted([d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))])
+print("Flower classes found:", class_names)
+
+# Display sample images
+plt.figure(figsize=(15, 8))
+for i, class_name in enumerate(class_names):
+    class_dir = os.path.join(data_dir, class_name)
+    image_files = [f for f in os.listdir(class_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+
+    if image_files:
+        img_path = os.path.join(class_dir, image_files[0])
+        img = plt.imread(img_path)
+        plt.subplot(2, 3, i + 1)
+        plt.imshow(img)
+        plt.title(f"{class_name} ({len(image_files)} images)")
+        plt.axis('off')
+
+plt.tight_layout()
+plt.show()
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.applications.efficientnet import preprocess_input
+
+# Constants
+IMG_SIZE = (224, 224)  # EfficientNet default input size
+BATCH_SIZE = 32
+VAL_SPLIT = 0.2
+
+# Data augmentation for training
+train_datagen = ImageDataGenerator(
+    preprocessing_function=preprocess_input,
+    rotation_range=20,
+    width_shift_range=0.2,
+    height_shift_range=0.2,
+    shear_range=0.2,
+    zoom_range=0.2,
+    horizontal_flip=True,
+    fill_mode='nearest',
+    validation_split=VAL_SPLIT
+)
+
+# Training generator
+train_generator = train_datagen.flow_from_directory(
+    data_dir,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
+    subset='training',
+    shuffle=True
+)
+
+# Validation generator
+val_generator = train_datagen.flow_from_directory(
+    data_dir,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
+    subset='validation',
+    shuffle=False
+)
+
+print("Class indices:", train_generator.class_indices)
+from tensorflow.keras.applications import EfficientNetB4
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+
+def create_model(num_classes):
+    # Load EfficientNetB4 (pretrained on ImageNet)
+    base_model = EfficientNetB4(
+        input_shape=(224, 224, 3),
+        include_top=False,
+        weights='imagenet'
+    )
+
+    # Freeze base layers
+    base_model.trainable = False
+
+    # Add custom classification head
+    inputs = tf.keras.Input(shape=(224, 224, 3))
+    x = base_model(inputs, training=False)
+    x = GlobalAveragePooling2D()(x)
+    x = Dropout(0.2)(x)
+    outputs = Dense(num_classes, activation='softmax')(x)
+
+    model = Model(inputs, outputs)
+    return model
+
+num_classes = len(class_names)
+model = create_model(num_classes)
+
+# Compile the model
+model.compile(
+    optimizer=Adam(learning_rate=0.001),
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+model.summary()
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+
+# Callbacks
+checkpoint = ModelCheckpoint(
+    'best_model.h5',
+    monitor='val_accuracy',
+    save_best_only=True,
+    mode='max'
+)
+
+early_stopping = EarlyStopping(
+    monitor='val_loss',
+    patience=5,
+    restore_best_weights=True
+)
+
+reduce_lr = ReduceLROnPlateau(
+    monitor='val_loss',
+    factor=0.2,
+    patience=3,
+    min_lr=1e-6
+)
+
+# Train the model
+history = model.fit(
+    train_generator,
+    steps_per_epoch=train_generator.samples // BATCH_SIZE,
+    validation_data=val_generator,
+    validation_steps=val_generator.samples // BATCH_SIZE,
+    epochs=20,
+    callbacks=[checkpoint, early_stopping, reduce_lr]
+)
+def plot_history(history):
+    plt.figure(figsize=(12, 4))
+
+    # Plot Accuracy
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['accuracy'], label='Train Accuracy')
+    plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+    plt.title('Accuracy over epochs')
+    plt.legend()
+
+    # Plot Loss
+    plt.subplot(1, 2, 2)
+    plt.plot(history.history['loss'], label='Train Loss')
+    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.title('Loss over epochs')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+plot_history(history)
+def predict_flower(image_path):
+    img = tf.keras.preprocessing.image.load_img(image_path, target_size=IMG_SIZE)
+    img_array = tf.keras.preprocessing.image.img_to_array(img)
+    img_array = preprocess_input(img_array)
+    img_array = tf.expand_dims(img_array, 0)  # Add batch dimension
+
+    predictions = model.predict(img_array)
+    predicted_class = class_names[tf.argmax(predictions[0]).numpy()]
+    confidence = tf.reduce_max(predictions[0]).numpy()
+
+    plt.imshow(img)
+    plt.title(f"Predicted: {predicted_class} ({confidence:.2%})")
+    plt.axis('off')
+    plt.show()
+
+    return predicted_class, confidence
+
+# Test on a sample image
+sample_image = os.path.join(data_dir, class_names[0], os.listdir(os.path.join(data_dir, class_names[0]))[0])
+predict_flower(sample_image)
